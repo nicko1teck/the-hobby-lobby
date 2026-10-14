@@ -1,0 +1,86 @@
+# Builds the WAR and deploys it to Tomcat on EC2 whenever master is pushed.
+# Can also be started by hand from the repo's Actions tab ("Run workflow").
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   EC2_HOST     the server's Elastic IP
+#   EC2_USER     the login user on the server (ec2-user)
+#   EC2_SSH_KEY  the PRIVATE half of the dedicated deploy key
+#
+# The app's passwords are NOT here. They live in Tomcat's bin/setenv.sh on the server.
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Never run two deployments at once.
+concurrency:
+  group: deploy-the-hobby-lobby
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TOMCAT_HOME: /usr/local/apache-tomcat-9.0.102
+  APP_NAME: the-hobby-lobby
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          cache: maven
+
+      # Tests are skipped on purpose: they use a real database and one creates users.
+      - name: Build the WAR
+        run: mvn -B -DskipTests clean package
+
+      - name: Pick the WAR file
+        run: |
+          WAR=$(ls target/*.war | head -n 1)
+          echo "Built: $WAR"
+          cp "$WAR" "$APP_NAME.war"
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload the WAR to the server
+        run: |
+          scp -i ~/.ssh/deploy_key "$APP_NAME.war" \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/$APP_NAME.war"
+
+      - name: Back up the old WAR and install the new one
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" bash -s <<'REMOTE'
+          set -euo pipefail
+          TOMCAT_HOME="/usr/local/apache-tomcat-9.0.102"
+          WEBAPPS="$TOMCAT_HOME/webapps"
+          APP_NAME="the-hobby-lobby"
+
+          # Keep the previous WAR so you can roll back.
+          mkdir -p ~/war-backups
+          if [ -f "$WEBAPPS/$APP_NAME.war" ]; then
+            cp "$WEBAPPS/$APP_NAME.war" ~/war-backups/$APP_NAME-$(date +%Y%m%d-%H%M%S).war
+          fi
+          # Keep only the 5 newest backups.
+          ls -1t ~/war-backups/$APP_NAME-*.war 2>/dev/null | tail -n +6 | xargs -r rm -f
+
+          # Install the new WAR. Tomcat notices the change and redeploys.
+          sudo cp /tmp/$APP_NAME.war "$WEBAPPS/$APP_NAME.war"
+          sudo chown tomcat:tomcat "$WEBAPPS/$APP_NAME.war"
+          rm -f /tmp/$APP_NAME.war
+          echo "Installed new $APP_NAME.war"
+          REMOTE

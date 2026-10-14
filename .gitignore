@@ -1,0 +1,29 @@
+# Build output
+target/
+*.war
+
+# Secrets and local configuration - never commit these
+.env
+.env.*
+setenv.sh
+src/main/resources/application-dev.properties
+src/main/resources/application-local.properties
+
+# IDE and tool files
+.idea/
+*.iml
+.settings/
+.classpath
+.project
+.sts4-cache/
+.vscode/
+bin/
+out/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Environment variables for The Hobby Lobby on a Tomcat server.
+#
+# 1. Copy this file to  $CATALINA_BASE/bin/setenv.sh  ON THE SERVER (Tomcat runs it at startup).
+# 2. Replace every placeholder with a real value. Keep the single quotes.
+#    (If a password contains a single quote, write it as '\'' inside the quotes.)
+# 3. Lock the file down:  chmod 600 setenv.sh
+# 4. Restart Tomcat.
+#
+# Never commit the real setenv.sh - it is git-ignored.
+
+# Database (MySQL). Use the database server's private IP.
+export DB_URL='jdbc:mysql://DB_PRIVATE_IP:3306/springboottutorial?useSSL=false&allowPublicKeyRetrieval=true'
+export DB_USERNAME='your_db_user'
+export DB_PASSWORD='your_db_password'
+
+# Cloudinary (image storage) - from your Cloudinary dashboard
+export CLOUDINARY_CLOUD_NAME='your_cloud_name'
+export CLOUDINARY_API_KEY='your_api_key'
+export CLOUDINARY_API_SECRET='your_api_secret'
+
+# Outgoing email (Gmail SMTP). Use a Gmail app password, not the account password.
+export MAIL_USERNAME='your_account@gmail.com'
+export MAIL_PASSWORD='your_gmail_app_password'
+
+# The public address of the deployed app, with no trailing slash.
+# Used to build the links in verification emails.
+export SITE_URL='http://your-server-address:8080/the-hobby-lobby'

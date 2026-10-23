@@ -68,25 +68,43 @@ jobs:
           set -euo pipefail
           TOMCAT_HOME="/usr/local/apache-tomcat-9.0.102"
           WEBAPPS="$TOMCAT_HOME/webapps"
-          APP_NAME="the-hobby-lobby"
+          APP_NAME="the-hobby-lobby"   # name of the uploaded file and of the backups
+          DEPLOY_AS="ROOT"             # ROOT.war is served at "/", so the subdomain opens the app directly
+          STAMP=$(date +%Y%m%d-%H%M%S)
 
           # Keep the previous WAR so you can roll back.
           mkdir -p ~/war-backups
           # webapps/ belongs to tomcat and is closed to other users, so use sudo here.
-          if sudo test -f "$WEBAPPS/$APP_NAME.war"; then
-            BACKUP=~/war-backups/$APP_NAME-$(date +%Y%m%d-%H%M%S).war
-            sudo cp "$WEBAPPS/$APP_NAME.war" "$BACKUP"
+          if sudo test -f "$WEBAPPS/$DEPLOY_AS.war"; then
+            BACKUP=~/war-backups/$APP_NAME-$STAMP.war
+            sudo cp "$WEBAPPS/$DEPLOY_AS.war" "$BACKUP"
             sudo chown "$(id -un)":"$(id -gn)" "$BACKUP"
             echo "Backed up old WAR to $BACKUP"
           else
-            echo "No existing $APP_NAME.war to back up (first deploy?)"
+            echo "No existing $DEPLOY_AS.war to back up (first deploy at the root?)"
           fi
+
+          # One-time move to the root (does nothing on later deploys):
+          # 1) set Tomcat's default welcome app aside, so it doesn't compete for "/"
+          if sudo test -d "$WEBAPPS/ROOT" && ! sudo test -f "$WEBAPPS/ROOT.war"; then
+            sudo mv "$WEBAPPS/ROOT" ~/tomcat-default-ROOT-$STAMP
+            echo "Moved Tomcat's default ROOT app to ~/tomcat-default-ROOT-$STAMP"
+          fi
+          # 2) retire the old copy served at /the-hobby-lobby/ (keep it as a backup)
+          if sudo test -f "$WEBAPPS/$APP_NAME.war"; then
+            BACKUP=~/war-backups/$APP_NAME-$STAMP-old-path.war
+            sudo cp "$WEBAPPS/$APP_NAME.war" "$BACKUP"
+            sudo chown "$(id -un)":"$(id -gn)" "$BACKUP"
+            sudo rm -f "$WEBAPPS/$APP_NAME.war"
+            echo "Removed the old /$APP_NAME/ deployment (backed up to $BACKUP)"
+          fi
+
           # Keep only the 5 newest backups.
           ls -1t ~/war-backups/$APP_NAME-*.war 2>/dev/null | tail -n +6 | xargs -r rm -f || true
 
           # Install the new WAR. Tomcat notices the change and redeploys.
-          sudo cp /tmp/$APP_NAME.war "$WEBAPPS/$APP_NAME.war"
-          sudo chown tomcat:tomcat "$WEBAPPS/$APP_NAME.war"
+          sudo cp /tmp/$APP_NAME.war "$WEBAPPS/$DEPLOY_AS.war"
+          sudo chown tomcat:tomcat "$WEBAPPS/$DEPLOY_AS.war"
           rm -f /tmp/$APP_NAME.war
-          echo "Installed new $APP_NAME.war"
+          echo "Installed new $DEPLOY_AS.war (served at /)"
           REMOTE

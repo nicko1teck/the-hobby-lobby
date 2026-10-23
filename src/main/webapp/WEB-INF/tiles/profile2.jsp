@@ -53,7 +53,7 @@
 				<div>
 					<c:if test="${ownProfile == true}">
 
-						<form action="/the-hobby-lobby/upload" method="post" enctype="multipart/form-data">
+						   <form action="${contextRoot}/upload" method="post" enctype="multipart/form-data">
 							<input type="file" accept="*" name="file" /> 
 							<input type="submit" value="Upload File" /> 
 							<input type="hidden" name="${_csrf.parameterName}" value="${_csrf.token}" />

@@ -101,7 +101,10 @@ jobs:
           aws ssm get-command-invocation \
             --command-id "$CMD_ID" --instance-id "${{ vars.EC2_INSTANCE_ID }}" \
             --query '[StandardOutputContent, StandardErrorContent]' --output text || true
-          if [ "$STATUS" != "Success" ]; then
-            echo "::error::Deploy did not succeed (status: $STATUS). Is Server A running? It's scheduled 7 AM to 10 PM Central."
-            exit 1
-          fi
+          case "$STATUS" in
+            Success) echo "Deploy succeeded." ;;
+            Failed)  echo "::error::The install script failed on Server A. See its output above."; exit 1 ;;
+            Pending|InProgress|Delayed|Undeliverable|TimedOut|DeliveryTimedOut)
+                     echo "::error::Server A never ran the command (status: $STATUS). Is it running? It's scheduled 7 AM to 10 PM Central."; exit 1 ;;
+            *)       echo "::error::Deploy did not succeed (status: $STATUS)."; exit 1 ;;
+          esac

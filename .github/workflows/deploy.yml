@@ -1,12 +1,16 @@
-# Builds the WAR and deploys it to Tomcat on EC2 whenever master is pushed.
+# Builds the WAR and deploys it to Tomcat on Server A whenever master is pushed.
 # Can also be started by hand from the repo's Actions tab ("Run workflow").
 #
-# Required repository secrets (Settings > Secrets and variables > Actions):
-#   EC2_HOST     the server's Elastic IP
-#   EC2_USER     the login user on the server (ec2-user)
-#   EC2_SSH_KEY  the PRIVATE half of the dedicated deploy key
+# No keys or passwords are stored for this. GitHub gives each run a short-lived
+# OIDC token; AWS swaps it for a temporary role (github-deploy-hobby-lobby) that
+# may only upload to the deploy bucket and run commands on Server A.
+#
+# Required repository VARIABLES (Settings > Secrets and variables > Actions > Variables):
+#   AWS_DEPLOY_ROLE_ARN   ARN of the github-deploy-hobby-lobby role
+#   EC2_INSTANCE_ID       Server A's instance ID
 #
 # The app's passwords are NOT here. They live in Tomcat's bin/setenv.sh on the server.
+# Server A runs 7 AM to 10 PM Central; a deploy outside those hours will time out.
 name: Deploy to EC2
 
 on:
@@ -20,11 +24,13 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  id-token: write   # lets the run request its OIDC token
+  contents: read    # lets actions/checkout read the code
 
 env:
-  TOMCAT_HOME: /usr/local/apache-tomcat-9.0.102
   APP_NAME: the-hobby-lobby
+  AWS_REGION: us-east-1
+  BUCKET: nickowen-deploy-artifacts
 
 jobs:
   deploy:
@@ -50,61 +56,52 @@ jobs:
           echo "Built: $WAR"
           cp "$WAR" "$APP_NAME.war"
 
-      - name: Set up SSH
+      # Swap GitHub's OIDC token for temporary AWS credentials (pinned to a commit, as GitHub's docs show).
+      - name: Get temporary AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Each commit gets its own folder, so nothing is ever overwritten.
+      - name: Upload the WAR and install script to S3
         run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+          PREFIX="hobby-lobby/$GITHUB_SHA"
+          aws s3 cp "$APP_NAME.war"     "s3://$BUCKET/$PREFIX/$APP_NAME.war" --only-show-errors
+          aws s3 cp deploy/install.sh   "s3://$BUCKET/$PREFIX/install.sh"    --only-show-errors
+          echo "PREFIX=$PREFIX" >> "$GITHUB_ENV"
 
-      - name: Upload the WAR to the server
+      - name: Tell Server A to install it (SSM Run Command)
         run: |
-          scp -i ~/.ssh/deploy_key "$APP_NAME.war" \
-            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/$APP_NAME.war"
+          PARAMS=$(jq -n \
+            --arg get "aws s3 cp s3://$BUCKET/$PREFIX/install.sh /tmp/hl-install.sh --only-show-errors" \
+            --arg run "bash /tmp/hl-install.sh $BUCKET $PREFIX/$APP_NAME.war" \
+            '{commands: [$get, $run]}')
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ vars.EC2_INSTANCE_ID }}" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy $APP_NAME ${GITHUB_SHA::7}" \
+            --timeout-seconds 600 \
+            --parameters "$PARAMS" \
+            --query Command.CommandId --output text)
+          echo "Command ID: $CMD_ID"
+          echo "CMD_ID=$CMD_ID" >> "$GITHUB_ENV"
 
-      - name: Back up the old WAR and install the new one
+      - name: Wait for the result
         run: |
-          ssh -i ~/.ssh/deploy_key "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" bash -s <<'REMOTE'
-          set -euo pipefail
-          TOMCAT_HOME="/usr/local/apache-tomcat-9.0.102"
-          WEBAPPS="$TOMCAT_HOME/webapps"
-          APP_NAME="the-hobby-lobby"   # name of the uploaded file and of the backups
-          DEPLOY_AS="ROOT"             # ROOT.war is served at "/", so the subdomain opens the app directly
-          STAMP=$(date +%Y%m%d-%H%M%S)
-
-          # Keep the previous WAR so you can roll back.
-          mkdir -p ~/war-backups
-          # webapps/ belongs to tomcat and is closed to other users, so use sudo here.
-          if sudo test -f "$WEBAPPS/$DEPLOY_AS.war"; then
-            BACKUP=~/war-backups/$APP_NAME-$STAMP.war
-            sudo cp "$WEBAPPS/$DEPLOY_AS.war" "$BACKUP"
-            sudo chown "$(id -un)":"$(id -gn)" "$BACKUP"
-            echo "Backed up old WAR to $BACKUP"
-          else
-            echo "No existing $DEPLOY_AS.war to back up (first deploy at the root?)"
+          STATUS="Pending"
+          for i in $(seq 1 60); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "${{ vars.EC2_INSTANCE_ID }}" \
+              --query Status --output text 2>/dev/null || echo Pending)
+            case "$STATUS" in Pending|InProgress|Delayed) continue ;; *) break ;; esac
+          done
+          echo "Status: $STATUS"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "${{ vars.EC2_INSTANCE_ID }}" \
+            --query '[StandardOutputContent, StandardErrorContent]' --output text || true
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::Deploy did not succeed (status: $STATUS). Is Server A running? It's scheduled 7 AM to 10 PM Central."
+            exit 1
           fi
-
-          # One-time move to the root (does nothing on later deploys):
-          # 1) set Tomcat's default welcome app aside, so it doesn't compete for "/"
-          if sudo test -d "$WEBAPPS/ROOT" && ! sudo test -f "$WEBAPPS/ROOT.war"; then
-            sudo mv "$WEBAPPS/ROOT" ~/tomcat-default-ROOT-$STAMP
-            echo "Moved Tomcat's default ROOT app to ~/tomcat-default-ROOT-$STAMP"
-          fi
-          # 2) retire the old copy served at /the-hobby-lobby/ (keep it as a backup)
-          if sudo test -f "$WEBAPPS/$APP_NAME.war"; then
-            BACKUP=~/war-backups/$APP_NAME-$STAMP-old-path.war
-            sudo cp "$WEBAPPS/$APP_NAME.war" "$BACKUP"
-            sudo chown "$(id -un)":"$(id -gn)" "$BACKUP"
-            sudo rm -f "$WEBAPPS/$APP_NAME.war"
-            echo "Removed the old /$APP_NAME/ deployment (backed up to $BACKUP)"
-          fi
-
-          # Keep only the 5 newest backups.
-          ls -1t ~/war-backups/$APP_NAME-*.war 2>/dev/null | tail -n +6 | xargs -r rm -f || true
-
-          # Install the new WAR. Tomcat notices the change and redeploys.
-          sudo cp /tmp/$APP_NAME.war "$WEBAPPS/$DEPLOY_AS.war"
-          sudo chown tomcat:tomcat "$WEBAPPS/$DEPLOY_AS.war"
-          rm -f /tmp/$APP_NAME.war
-          echo "Installed new $DEPLOY_AS.war (served at /)"
-          REMOTE
